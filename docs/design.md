@@ -1,10 +1,10 @@
 # VerifiedRAG: Design Document
 
-| | |
-|---|---|
-| **Status** | Draft v0.1 |
-| **Author** | Chinmay Lokare |
-| **Last updated** | 2026-11-17 |
+|                        |                                    |
+| ---------------------- | ---------------------------------- |
+| **Status**       | Draft v0.1                         |
+| **Author**       | Chinmay Lokare                     |
+| **Last updated** | 2026-11-17                         |
 | **First domain** | SEC financial filings (10-K, 10-Q) |
 
 ---
@@ -56,15 +56,16 @@ The same shape of problem appears in insurance policies, clinical trial reports,
 
 All targets are initial and will be revised from measurements. No number goes in the README unless it came from an eval run.
 
-| Metric | Definition | Initial target |
-|---|---|---|
-| Wrong-answer rate | Wrong answers ÷ answered questions | < 2% |
-| Coverage | Answered questions ÷ all questions | Report it; aim for > 75% |
-| Citation validity | Citations whose source supports the claim | > 99% |
-| Baseline gap | Accuracy vs. a naive RAG baseline on the same questions | Report it |
-| P95 latency | End-to-end, multi-step questions | < 10 s |
-| Cost per question | Model and infrastructure cost, averaged | < $0.03 |
-| Cost per correct answer | Total cost ÷ correct answers | Report it |
+| Metric                  | Definition                                              | Initial target           |
+| ----------------------- | ------------------------------------------------------- | ------------------------ |
+| Wrong-answer rate       | Wrong answers ÷ answered questions                     | < 2%                     |
+| Coverage                | Answered questions ÷ all questions                     | Report it; aim for > 75% |
+| Citation validity       | Citations whose source supports the claim               | > 99%                    |
+| Baseline gap            | Accuracy vs. a naive RAG baseline on the same questions | Report it                |
+| P95 latency             | End-to-end, multi-step questions                        | < 10 s                   |
+| Cost per question       | Model and infrastructure cost, averaged                 | < $0.03                  |
+| Cost per correct answer | Total cost ÷ correct answers                           | Report it                |
+| Running cost            | Total monthly cloud and model spend at demo traffic     | < $10                    |
 
 ## 5. Architecture
 
@@ -74,10 +75,9 @@ There are two pipelines: **ingestion** prepares documents ahead of time, and **q
 
 ```mermaid
 flowchart LR
-    subgraph Ingestion
-        SRC["Source connector<br/>(per pack)"] --> RAW[("S3<br/>raw documents")]
-        RAW --> Q1[["SQS"]]
-        Q1 --> PARSE["Parse<br/>sections, tables, facts"]
+    subgraph Ingestion["Ingestion (scheduled batch job)"]
+        SRC["Source connector<br/>(per pack)"] --> RAW[("Raw document store")]
+        RAW --> PARSE["Parse<br/>sections, tables, facts"]
         PARSE --> NORM["Normalize<br/>concepts, units, periods"]
         NORM --> EMB["Chunk + embed"]
     end
@@ -93,7 +93,9 @@ flowchart LR
     EMB --> CHUNKS
 
     subgraph Answering
-        U["User"] --> API["API<br/>auth, rate limit, budget"]
+        U["Web UI"] --> API["FastAPI<br/>auth, rate limit, budget"]
+        MCPC["MCP clients<br/>(Claude, IDE agents)"] --> MCPS["MCP server"]
+        MCPS --> API
         API --> GUARD["Input guard"]
         GUARD --> AGENT["Agent loop<br/>max steps, max cost"]
         AGENT <--> TOOLS["Tools"]
@@ -114,7 +116,8 @@ flowchart LR
 4. **Nothing reaches the user unverified.** Verification is a separate step the agent cannot skip.
 5. **The agent is bounded.** Hard caps on steps, cost, and time. Read-only data access.
 6. **Prefer structured sources to parsing.** Where a document has machine-readable data (XBRL for SEC filings), use it before extracting tables from layout.
-7. **Simplest thing that works.** No framework until plain code becomes the bottleneck.
+7. **Frameworks for plumbing, plain code for correctness.** LangGraph orchestrates the agent and LangChain provides model and tool interfaces. The correctness-critical parts (query templates, calculator, verifier, confidence) are plain, tested Python with no framework dependency, so they can be reasoned about and swapped independently.
+8. **Cost is a design constraint.** Under $10 a month at demo traffic: scale-to-zero compute, free tiers, local open models for embeddings and safety classification, and the cheapest answer model that meets the correctness target. See [ADR-7](#adr-7-cost-first-infrastructure).
 
 ## 6. Data model
 
@@ -163,17 +166,19 @@ The same period's figure can appear in several filings, sometimes with different
 
 ## 7. Ingestion
 
-Ingestion is an AWS Step Functions workflow per document. Each step is idempotent and keyed by `content_hash` and `parser_version`, so a re-run after a crash, or of an unchanged document, is safe.
+Ingestion is a Python batch pipeline run as a CLI, locally or on a schedule in GitHub Actions. It never runs in the request path, so heavy parsing needs no always-on compute. Each step is idempotent and keyed by `content_hash` and `parser_version`, so a re-run after a crash, or of an unchanged document, is safe.
 
 1. **Discover.** The pack connector lists new documents. For finance, this is the EDGAR submissions API for a configured list of companies.
-2. **Fetch.** Store raw bytes in S3 under `{pack}/{entity}/{document}/`.
+2. **Fetch.** Store raw bytes under `{pack}/{entity}/{document}/` in the raw document store: local disk in development, an S3 bucket for the scheduled job.
 3. **Parse.** Split into sections, prose blocks, and tables. Uses Docling for layout and a pack-specific section detector (for example, 10-K Items 1, 1A, 7, 7A, and 8).
 4. **Extract facts.** For finance, read XBRL facts first, then extract untagged tables.
 5. **Normalize.** Map labels and tags to canonical concepts, convert scale, derive fiscal year and period, and set `is_latest_reported`.
 6. **Chunk and embed.** Chunk prose by heading and paragraph. Store each table as its own chunk in markdown. Prepend a context header (entity, document type, period, section) before embedding.
 7. **Commit.** Write all rows for the document in one transaction, then mark it `indexed`.
 
-Failures retry with backoff, then go to a dead-letter queue with an alert. Unmapped labels go to a review queue rather than failing ingestion.
+Failures retry with backoff. A document that still fails is recorded with status `failed` and its error, and the run exits non-zero, so the scheduled workflow fails and sends a notification. Re-running picks up only failed and new documents. Unmapped labels go to a review table rather than failing ingestion.
+
+Each chunk is also scored by the prompt-injection classifier at ingestion (section 10). Flagged chunks are stored with a flag that lowers answer confidence and is logged for review.
 
 ### Finance-specific notes
 
@@ -192,48 +197,67 @@ Failures retry with backoff, then go to a dead-letter queue with an alert. Unmap
 4. **Verifier.** Check every claim and compute a confidence score.
 5. **Respond.** Stream the answer with citations, or a refusal with the evidence found.
 
-### 8.2 Agent loop
+### 8.2 Agent graph
 
-The loop is plain Python with the model provider's SDK and Pydantic tool schemas.
+The request flow is a LangGraph state graph. Models are called through LangChain chat model interfaces (`ChatAnthropic`, with `ChatOllama` for offline development), and tools are LangChain tools whose input schemas are Pydantic models.
 
-```python
-messages = [system_prompt(pack), user_question]
-for step in range(MAX_STEPS):                 # e.g. 8
-    reply = model.call(messages, tools=TOOLS)
-    for call in reply.tool_calls:             # may be several, run in parallel
-        if call.name == "submit_answer":
-            return verify(call.input)         # structured draft, see 8.4
-        messages.append(run_tool(call))       # validated, logged, budgeted
-    check_budget(request)                     # cost and wall-clock caps
-return refusal("step limit reached")
+```mermaid
+flowchart LR
+    START((start)) --> G["guard"]
+    G -->|"out of scope"| R["refuse"]
+    G -->|"in scope"| A["agent<br/>(model with tools)"]
+    A -->|"tool calls"| T["tools"]
+    T --> B{"budget ok?"}
+    B -->|"yes"| A
+    B -->|"no"| R
+    A -->|"submit_answer"| V["verify"]
+    V -->|"passes threshold"| OUT["respond"]
+    V -->|"fixable, first failure"| A
+    V -->|"fails"| R
 ```
 
+Graph state holds the messages, evidence references collected so far, step and cost counters, and the retry count. All nodes are thin wrappers: the verifier, calculator, and query templates are plain modules that the nodes call, and they are unit-tested without LangGraph.
+
+- **Hard limits.** A per-request step cap (graph recursion limit), a cost cap checked after each tool round, and a wall-clock timeout.
+- **Checkpointing.** A Postgres checkpointer stores graph state per thread. This supports follow-up questions in the same conversation and lets an interrupted run be inspected or resumed.
 - **Parallel calls.** Independent lookups run concurrently.
 - **Prompt caching.** The system prompt and tool definitions are identical across turns and requests, so they are cached.
 - **Retrieved text is untrusted.** Tool results are wrapped and labeled as document content, never as instructions.
 
 ### 8.3 Tools
 
-| Tool | Purpose | Backed by |
-|---|---|---|
-| `resolve_entity(name)` | Name or ticker to `entity_id` | `entities`, alias match, then fuzzy match |
-| `resolve_concept(phrase)` | "revenue" to candidate concepts | `concept_aliases`, then embedding match; returns candidates |
-| `query_facts(template, params)` | Exact figure lookups | Fixed SQL templates, read-only role |
-| `search_text(query, filters)` | Explanations and context | Hybrid search, then reranker |
-| `calculate(expression, inputs)` | Arithmetic on fact or calc IDs | Decimal math with unit checks |
-| `submit_answer(claims)` | Final structured answer | Goes to the verifier |
+| Tool                              | Purpose                         | Backed by                                                     |
+| --------------------------------- | ------------------------------- | ------------------------------------------------------------- |
+| `resolve_entity(name)`          | Name or ticker to `entity_id` | `entities`, alias match, then fuzzy match                   |
+| `resolve_concept(phrase)`       | "revenue" to candidate concepts | `concept_aliases`, then embedding match; returns candidates |
+| `query_facts(template, params)` | Exact figure lookups            | Fixed SQL templates, read-only role                           |
+| `search_text(query, filters)`   | Explanations and context        | Hybrid search, then reranker                                  |
+| `calculate(expression, inputs)` | Arithmetic on fact or calc IDs  | Decimal math with unit checks                                 |
+| `submit_answer(claims)`         | Final structured answer         | Goes to the verifier                                          |
+
+### 8.7 MCP server
+
+The system is also exposed as a Model Context Protocol server, built with the official MCP Python SDK, so AI assistants and IDE agents can use it as a tool. It calls the same API, so authentication, rate limits, budgets, and verification all apply.
+
+| MCP tool                              | Returns                                                                |
+| ------------------------------------- | ---------------------------------------------------------------------- |
+| `ask(question, pack)`               | A verified answer with citations, or a refusal with the evidence found |
+| `get_fact(entity, concept, period)` | One fact with its source                                               |
+| `search_documents(query, filters)`  | Ranked passages with document references                               |
+
+It runs over stdio for local use and over Streamable HTTP with OAuth when deployed. Only verified answers leave through `ask`, so a client agent can't bypass the verifier.
 
 #### Query templates
 
 The model never writes SQL. It chooses a template and fills in typed parameters, which are bound as parameters, never concatenated into the query string. All joins live in views and templates written by hand.
 
-| Template | Example question |
-|---|---|
-| `lookup` | Apple's revenue in fiscal 2024 |
-| `time_series` | Apple's revenue from 2020 to 2024 |
+| Template             | Example question                                   |
+| -------------------- | -------------------------------------------------- |
+| `lookup`           | Apple's revenue in fiscal 2024                     |
+| `time_series`      | Apple's revenue from 2020 to 2024                  |
 | `compare_entities` | Apple vs. Microsoft operating income, 2022 to 2024 |
-| `breakdown` | Apple's revenue by segment in 2024 |
-| `fact_source` | The table and chunk a fact came from |
+| `breakdown`        | Apple's revenue by segment in 2024                 |
+| `fact_source`      | The table and chunk a fact came from               |
 
 Templates run under a database role that can only `SELECT` from specific views, with a statement timeout and a row limit. Questions that fit no template are logged. A new template is added when a pattern recurs.
 
@@ -268,15 +292,18 @@ A claim without evidence fails verification automatically.
 ### 8.5 Verifier
 
 **Numeric claims, checked by code:**
+
 - Load the referenced fact or calculation, and recompute calculations from their inputs.
 - Compare the value to the claim text at the claim's stated precision, after unit and scale conversion.
 - Check that the stated entity, concept, and period match the evidence metadata.
 
 **Textual claims, checked by a small model, then by code:**
+
 - Ask: "Does this passage support this sentence? Answer supported, partial, or unsupported, and quote the supporting words."
 - Confirm the quoted words appear verbatim in the chunk, so the checking model can't invent evidence.
 
 **Outcomes:**
+
 - Unsupported, non-central claims are removed, or the agent gets one retry with the failure reasons.
 - If the central claim fails, the response is a refusal.
 
@@ -315,17 +342,17 @@ Accuracy is reported per pack. Domains without structured tags depend on table e
 
 Mapped to the OWASP Top 10 for LLM Applications (2025).
 
-| Threat | OWASP | Mitigation |
-|---|---|---|
-| Instructions hidden in ingested documents | LLM01 Prompt injection | Retrieved text is labeled untrusted; tools are read-only; output is verified against evidence; red-team tests in CI |
-| Users steering the agent off scope | LLM01 | Input guard; domain prompt; refusal path |
-| Fabricated or wrong numbers | LLM09 Misinformation | Facts-only figures, calculator by reference, verifier, calibrated abstention |
-| Harmful database queries | LLM05, LLM06 | No model-written SQL; bound parameters; read-only role on views; timeout and row limit |
-| Runaway cost or loops | LLM10 Unbounded consumption | Step, cost, and time caps per request; per-user rate limits; daily spend cap with alert |
-| One user seeing another's private documents | LLM02, LLM08 | v1 holds public data only. Private uploads need per-tenant filters enforced in SQL, plus isolation tests |
-| Leaking the system prompt or secrets | LLM07 | No secrets in prompts; secrets in AWS Secrets Manager; prompt contents assumed public |
-| Poisoned concept mappings | LLM04 | Suggested mappings are marked and spot-checked before use |
-| Compromised dependencies | LLM03 | Pinned lockfile, dependency scanning in CI, no vendored packages in git |
+| Threat                                      | OWASP                       | Mitigation                                                                                                                                                                                                      |
+| ------------------------------------------- | --------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Instructions hidden in ingested documents   | LLM01 Prompt injection      | Open-source injection classifier scores chunks at ingestion and user input at request time; retrieved text is labeled untrusted; tools are read-only; output is verified against evidence; red-team tests in CI |
+| Users steering the agent off scope          | LLM01                       | Input guard; domain prompt; refusal path                                                                                                                                                                        |
+| Fabricated or wrong numbers                 | LLM09 Misinformation        | Facts-only figures, calculator by reference, verifier, calibrated abstention                                                                                                                                    |
+| Harmful database queries                    | LLM05, LLM06                | No model-written SQL; bound parameters; read-only role on views; timeout and row limit                                                                                                                          |
+| Runaway cost or loops                       | LLM10 Unbounded consumption | Step, cost, and time caps per request; per-user rate limits; daily spend cap with alert                                                                                                                         |
+| One user seeing another's private documents | LLM02, LLM08                | v1 holds public data only. Private uploads need per-tenant filters enforced in SQL, plus isolation tests                                                                                                        |
+| Leaking the system prompt or secrets        | LLM07                       | No secrets in prompts; secrets in AWS Systems Manager Parameter Store (SecureString); prompt contents assumed public                                                                                            |
+| Poisoned concept mappings                   | LLM04                       | Suggested mappings are marked and spot-checked before use                                                                                                                                                       |
+| Compromised dependencies                    | LLM03                       | Pinned lockfile, dependency scanning in CI, no vendored packages in git                                                                                                                                         |
 
 ### Scope boundary
 
@@ -334,6 +361,7 @@ The system answers factual questions about what documents say. It declines forec
 ### Red-team suite
 
 A fixed set of adversarial inputs runs in CI:
+
 - injected instructions inside test documents
 - out-of-scope requests
 - attempts to force SQL-like input through tool parameters
@@ -341,18 +369,31 @@ A fixed set of adversarial inputs runs in CI:
 
 ## 11. Evaluation
 
-| Layer | What it checks | When |
-|---|---|---|
-| Unit tests | Calculator, templates, parsers, normalizers, verifier logic | Every commit |
-| Component evals | Concept resolution accuracy, retrieval recall@k, table extraction accuracy | Every PR touching that component |
-| End-to-end (fast) | About 30 questions: wrong-answer rate, coverage, citation validity | Every PR, and the merge is blocked on regression |
-| End-to-end (full) | Full question set, plus the naive RAG baseline for comparison | Nightly and before releases |
-| Red-team | Section 10 suite | Every PR |
-| Production sampling | Random sample of real answers, verified and labeled weekly | Weekly; alert if the wrong-answer rate exceeds 2% |
+| Layer               | What it checks                                                             | When                                              |
+| ------------------- | -------------------------------------------------------------------------- | ------------------------------------------------- |
+| Unit tests          | Calculator, templates, parsers, normalizers, verifier logic                | Every commit                                      |
+| Component evals     | Concept resolution accuracy, retrieval recall@k, table extraction accuracy | Every PR touching that component                  |
+| End-to-end (fast)   | About 30 questions: wrong-answer rate, coverage, citation validity         | Every PR, and the merge is blocked on regression  |
+| End-to-end (full)   | Full question set, plus the naive RAG baseline for comparison              | Weekly, on demand, and before releases            |
+| Red-team            | Section 10 suite                                                           | Every PR                                          |
+| Production sampling | Random sample of real answers, verified and labeled weekly                 | Weekly; alert if the wrong-answer rate exceeds 2% |
+
+### Tooling
+
+- **LangSmith** stores the question sets as datasets and records each eval run as an experiment, so runs can be compared across commits, prompts, and models.
+- **RAGAS** reports standard retrieval metrics (context precision and recall) as a cross-check on the component evals. The project's own verifier and grading remain the source of truth for the correctness target.
+- **pytest** runs the harness, so the CI gate is an ordinary test job.
+
+### Eval cost control
+
+- **Default model only.** PR runs use the default answer model. Comparison runs against a larger model are manual.
+- **Replay cache.** Model responses are cached by a hash of model, prompt, and tool definitions. A PR that changes only non-model code replays cached responses and makes no paid calls, so unit-style eval checks run free. The cache is bypassed for weekly and release runs.
+- **Batch pricing.** Full runs use the provider's batch API where the answer flow allows it, at about half price.
+- **Budget per run.** The harness stops when a run exceeds its configured spend cap.
 
 ### Question sources
 
-- **FinanceBench open-source sample** (150 questions with human-verified answers) is the acceptance test. Some questions reference document types beyond 10-K and 10-Q, so check which documents each question needs and ingest them, or exclude those questions explicitly.
+- **FinanceBench open-source sample** (150 questions with human-verified answers, loaded with Hugging Face Datasets) is the acceptance test. Some questions reference document types beyond 10-K and 10-Q, so check which documents each question needs and ingest them, or exclude those questions explicitly.
 - **Own golden set:** questions targeting known hard cases, such as restatements, fiscal years that don't match calendar years, segments, and multi-company comparisons.
 - **User-reported failures:** each confirmed failure becomes a regression test.
 
@@ -366,31 +407,38 @@ A naive RAG pipeline (chunk, embed, top-k, generate) runs on the same questions 
 
 ## 12. Observability and operations
 
-- **Tracing:** one OpenTelemetry trace per request, with a span per model call and tool call, exported to Langfuse. Every response carries a `request_id`.
-- **Metrics (CloudWatch):** latency percentiles, cost per request, tokens, refusal rate, tool error rate, ingestion lag and failures, and DLQ depth.
-- **Alerts:** error rate, daily spend, DLQ messages, ingestion stalled, and weekly wrong-answer rate above target.
-- **Degradation:** if the answer model is unavailable, fall back to an alternative model and record it on the response; if the reranker fails, use fusion order. If verification can't run, refuse. Never return unverified answers.
+- **Tracing:** one trace per request in LangSmith, with a span per graph node, model call, and tool call. Spans are also emitted through OpenTelemetry so traces aren't locked to one vendor. Every response carries a `request_id` that links to its trace.
+- **Metrics (CloudWatch, within the free tier):** latency percentiles, cost per request, refusal rate, tool error rate, and ingestion failures. Per-request detail stays in logs and traces rather than custom metrics.
+- **Alerts:** error rate, daily model spend, failed ingestion runs, and weekly wrong-answer rate above target.
+- **Spend controls:** a monthly spend limit in the model provider's console, an AWS Budgets alert, and per-request and daily caps enforced in code.
+- **Degradation:** if the answer model is unavailable, fall back to an OpenAI model through the same LangChain interface and record which model answered; if the reranker fails, use fusion order. If verification can't run, refuse. Never return unverified answers.
 - **Runbook:** `docs/runbook.md` covers provider outage, parser failure on a new document format, spend spike, and a bad deploy.
 - **Postmortems:** real incidents get a short write-up in `docs/postmortems/`.
 
 ## 13. Tech stack
 
-| Layer | Choice | Notes |
-|---|---|---|
-| Language | Python 3.12 | `uv` for dependencies, Ruff, Pyright, pytest |
-| API | FastAPI with streamed responses | Same container locally and in AWS |
-| Agent | Plain loop, provider SDK, Pydantic | Revisit only if plain code becomes the bottleneck |
-| Models | Claude Sonnet 5.5 for answers; Claude Haiku 5.5 for guard, verifier, and mapping suggestions; via Amazon Bedrock | Model IDs and parameters live in config. Keep Haiku prompts under 100K tokens, where its price rises 5x for the whole request. Check current provider docs for parameter restrictions |
-| Embeddings and reranking | Bedrock-hosted embedding model and reranker | Pin model versions; store the embedding model version per chunk |
-| Parsing | Docling; XBRL data for finance | Vision-model fallback for hard tables only if evals justify it |
-| Database | Postgres with pgvector, full-text search | Aurora Serverless v2 in AWS; Docker Compose locally |
-| Ingestion | Step Functions, SQS, Lambda; Fargate for heavy parsing | Parsing can exceed Lambda's limits |
-| Auth | Amazon Cognito | |
-| Secrets | AWS Secrets Manager | Nothing in the repo or environment files |
-| Observability | OpenTelemetry, Langfuse, CloudWatch | |
-| Infrastructure | Terraform | Every resource; no console-only changes |
-| CI | GitHub Actions | Lint, types, tests, evals, red-team, Terraform plan |
-| Frontend | Minimal React or Next.js UI | Answer with clickable citations and a "report a problem" button |
+| Layer                     | Choice                                                                                                                                                                                                        | Notes                                                                                                                                                                                                                                                                                                                                             |
+| ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Language                  | Python 3.12                                                                                                                                                                                                   | `uv` for dependencies, Ruff, Pyright, pytest                                                                                                                                                                                                                                                                                                    |
+| API                       | FastAPI with streamed responses (server-sent events), Pydantic models for every request and response                                                                                                          | Same container locally and in AWS                                                                                                                                                                                                                                                                                                                 |
+| Agent orchestration       | LangGraph with a Postgres checkpointer                                                                                                                                                                        | See ADR-4                                                                                                                                                                                                                                                                                                                                         |
+| Model and tool interfaces | LangChain (`langchain-anthropic`, `langchain-openai`, `langchain-ollama`), tools with Pydantic schemas                                                                                                  | Provider-neutral interface makes model choice a config change                                                                                                                                                                                                                                                                                     |
+| Models                    | Claude Haiku 5.5 through the Anthropic API as the default for every step; Claude Sonnet 5.5 only in manual comparison runs; an open model through Ollama for offline development; an OpenAI model as fallback | Model IDs and parameters live in config. Haiku 5.5 lists at $0.10 / $0.50 per 1M tokens for prompts up to 100K tokens and 5x that above, for the whole request, so prompts stay well under 100K. Whether Haiku is good enough for answers is decided by evals, by cost per correct answer. Check current provider docs for parameter restrictions |
+| Agent interoperability    | MCP server (official MCP Python SDK)                                                                                                                                                                          | Section 8.7                                                                                                                                                                                                                                                                                                                                       |
+| Content safety            | Open-source prompt-injection classifier from Hugging Face (for example, Llama Prompt Guard 2) run locally, plus rule-based checks and the custom guard                                                        | No per-request fees. Scope and grounding rules stay in code                                                                                                                                                                                                                                                                                       |
+| Embeddings and reranking  | Open embedding model run locally with sentence-transformers or fastembed (384 dimensions, for example bge-small); open cross-encoder reranker added only if retrieval evals show it helps                     | No per-call cost; small vectors keep the database inside free-tier storage. Pin versions and store the embedding model version per chunk                                                                                                                                                                                                          |
+| Parsing                   | Docling; XBRL data for finance                                                                                                                                                                                | Vision-model fallback for hard tables only if evals justify it                                                                                                                                                                                                                                                                                    |
+| Database                  | Postgres with pgvector and full-text search                                                                                                                                                                   | Docker Compose locally. Deployed on a managed Postgres free tier with pgvector (Neon or Supabase). Use `halfvec` storage if space gets tight. No Aurora, no VPC, no NAT gateway                                                                                                                                                                 |
+| Ingestion                 | Python CLI pipeline, run locally or on a GitHub Actions schedule                                                                                                                                              | Free for public repositories; never in the request path                                                                                                                                                                                                                                                                                           |
+| API hosting               | FastAPI container on AWS Lambda behind a Function URL, using the AWS Lambda Web Adapter                                                                                                                       | Scales to zero and stays within the Lambda free tier at demo traffic. Cold starts of a few seconds are accepted. Confirm response streaming in M6                                                                                                                                                                                                 |
+| Auth                      | Amazon Cognito                                                                                                                                                                                                | The free tier covers this user count; check current limits                                                                                                                                                                                                                                                                                        |
+| Secrets                   | AWS Systems Manager Parameter Store (SecureString)                                                                                                                                                            | Free for standard parameters; nothing in the repo                                                                                                                                                                                                                                                                                                 |
+| Observability             | LangSmith free developer tier (traces), OpenTelemetry, CloudWatch within free-tier limits (logs, a few custom metrics and alarms)                                                                             | Check current free-tier limits before M6                                                                                                                                                                                                                                                                                                          |
+| Evaluation                | LangSmith datasets and experiments, RAGAS, pytest, Hugging Face Datasets                                                                                                                                      | Section 11                                                                                                                                                                                                                                                                                                                                        |
+| Containers                | Docker, Docker Compose                                                                                                                                                                                        | One image for API and workers                                                                                                                                                                                                                                                                                                                     |
+| Infrastructure            | Terraform                                                                                                                                                                                                     | Every resource; no console-only changes                                                                                                                                                                                                                                                                                                           |
+| CI                        | GitHub Actions                                                                                                                                                                                                | Lint, types, tests, evals, red-team, Terraform plan                                                                                                                                                                                                                                                                                               |
+| Frontend                  | Minimal React UI on a free static host (Netlify or GitHub Pages)                                                                                                                                              | Answer with clickable citations and a "report a problem" button                                                                                                                                                                                                                                                                                   |
 
 ## 14. Repository layout
 
@@ -407,7 +455,8 @@ verified-rag/
     postmortems/
   src/verified_rag/
     api/          # FastAPI app, auth, rate limits
-    agent/        # loop, prompts, budgets
+    mcp/          # MCP server
+    agent/        # LangGraph graph, nodes, prompts, budgets
     tools/        # resolve, query_facts, search_text, calculate
     verify/       # verifier, confidence
     ingest/       # workflow steps, chunking, embedding
@@ -429,56 +478,66 @@ verified-rag/
 
 Each milestone ends with something that runs and is tested.
 
-| # | Milestone | Done when |
-|---|---|---|
-| M0 | Skeleton | Repo layout, `uv`, Ruff, Pyright, pytest, CI, Docker Compose Postgres with pgvector, schema migrations |
-| M1 | Facts path | EDGAR connector for about 10 companies; XBRL facts normalized into `facts`; resolve tools, query templates, calculator; a CLI answers numeric questions correctly |
-| M2 | Agent and verifier | Agent loop, `submit_answer`, numeric verification, refusal path; tracing |
-| M3 | Text path | Filing HTML parsed into sections and tables; chunks with embeddings; hybrid search and reranker; textual claim verification |
-| M4 | Evals | Harness, FinanceBench subset, golden set, naive baseline, CI gate, red-team suite; first honest results table |
-| M5 | Calibration | Confidence score, threshold derived on held-out set, wrong-answer and coverage curves |
-| M6 | Production | Terraform for everything; API deployed with auth, rate limits, and budgets; alerts; runbook; frontend |
-| M7 | Users | Real user group, feedback button, failures becoming regression tests, weekly production sampling |
-| M8 | Second pack | Core extracted, second pack shipped, per-pack results |
-| M9 | Write-up | Engineering post: baseline, what fixed it, what still breaks, an incident postmortem, cost per correct answer |
+| #  | Milestone          | Done when                                                                                                                                                           |
+| -- | ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| M0 | Skeleton           | Repo layout, `uv`, Ruff, Pyright, pytest, CI, Docker Compose Postgres with pgvector, schema migrations                                                            |
+| M1 | Facts path         | EDGAR connector for about 10 companies; XBRL facts normalized into `facts`; resolve tools, query templates, calculator; a CLI answers numeric questions correctly |
+| M2 | Agent and verifier | LangGraph agent graph, `submit_answer`, numeric verification, refusal path; LangSmith tracing                                                                     |
+| M3 | Text path          | Filing HTML parsed into sections and tables; chunks with embeddings; hybrid search and reranker; textual claim verification                                         |
+| M4 | Evals              | Harness, FinanceBench subset, golden set, naive baseline, CI gate, red-team suite; first honest results table                                                       |
+| M5 | Calibration        | Confidence score, threshold derived on held-out set, wrong-answer and coverage curves                                                                               |
+| M6 | Production         | Terraform for everything; API and MCP server deployed with auth, rate limits, and budgets; injection classifier; spend controls; alerts; runbook; frontend          |
+| M7 | Users              | Real user group, feedback button, failures becoming regression tests, weekly production sampling                                                                    |
+| M8 | Second pack        | Core extracted, second pack shipped, per-pack results                                                                                                               |
+| M9 | Write-up           | Engineering post: baseline, what fixed it, what still breaks, an incident postmortem, cost per correct answer                                                       |
 
 If time runs short, M0 to M6 is a complete project. M7 is the biggest differentiator after that.
 
 ## 16. Decision log
 
 ### ADR-1: Fixed query templates over model-written SQL
+
 Model-written joins can duplicate rows and silently inflate totals while still returning plausible numbers. Templates are reviewable, testable, and immune to SQL injection. **Cost:** questions outside the templates can't use the facts path. **Mitigation:** log misses and add templates for recurring patterns.
 
 ### ADR-2: Postgres for vectors, text search, and facts
+
 One store keeps facts, chunks, and metadata joinable in a single query and transaction. **Cost:** Postgres full-text ranking isn't true BM25. **Mitigation:** swap in a BM25 extension or a dedicated search engine if retrieval evals show a gap.
 
 ### ADR-3: Structured sources before layout parsing
+
 XBRL tags give exact values, units, and periods. Parsing tables from layout is the fallback, not the default.
 
-### ADR-4: A plain agent loop, not a framework
-Six tools and one loop with hard limits are easier to test, trace, and explain. A framework is reconsidered if the loop grows branches that plain code handles poorly.
+### ADR-4: LangGraph for orchestration, plain modules for correctness
+
+The request flow is not a simple loop: it has a guard, a tool loop with budget checks, a verifier that can send the draft back once, and two exits. LangGraph models that as an explicit state graph, adds checkpointing for multi-turn threads, and integrates with LangSmith tracing. **Cost:** a framework dependency that changes often. **Mitigation:** pin versions, keep nodes thin, and keep the verifier, calculator, and templates free of framework imports, so a framework upgrade or replacement can't change correctness behavior.
 
 ### ADR-5: The final answer is a tool call
+
 `submit_answer` forces a structured draft with evidence on every claim, which makes verification mechanical rather than a parse of free text.
 
 ### ADR-6: Refuse rather than guess
+
 In this domain, a wrong number costs more than no answer. Coverage is a reported tradeoff, not a target to maximize.
+
+### ADR-7: Cost-first infrastructure
+
+The project runs on a personal budget, with a target under $10 a month at demo traffic. Everything is scale-to-zero or free tier: Lambda for the API, a free managed Postgres, ingestion as a scheduled batch job, local open models for embeddings and injection classification, and Parameter Store for secrets. Always-on or per-call services (Aurora, Fargate, NAT gateways, managed guardrails, Secrets Manager) are excluded. The largest variable cost is model calls, so the cheapest model that meets the correctness target is the default, and evals use replay caching and batch pricing. **Cost:** cold starts, free-tier limits on storage and traces, and less managed tooling. **Revisit:** if traffic or data grows past free tiers, each excluded service is a drop-in upgrade behind the same interfaces.
 
 ## 17. Risks
 
-| Risk | Impact | Mitigation |
-|---|---|---|
+| Risk                                                 | Impact                               | Mitigation                                                                              |
+| ---------------------------------------------------- | ------------------------------------ | --------------------------------------------------------------------------------------- |
 | Concept mapping errors (similar line items confused) | Wrong but verifiable-looking answers | Candidate lists from `resolve_concept`, ambiguity lowers confidence, golden-set tests |
-| Fiscal period mistakes | Wrong year reported | Derive periods from dates; tests on non-calendar fiscal years |
-| Table extraction quality outside finance | Lower accuracy in other packs | Report per pack; vision fallback only if evals justify it |
-| Model or provider behavior changes | Silent regressions | Pinned model versions; eval gate; recalibrate on change |
-| Running cost | Budget overrun | Spend caps, caching, cheap models for high-volume checks, scale-to-zero infrastructure |
-| Scope creep | Unfinished project | Milestone order; the second pack is optional |
+| Fiscal period mistakes                               | Wrong year reported                  | Derive periods from dates; tests on non-calendar fiscal years                           |
+| Table extraction quality outside finance             | Lower accuracy in other packs        | Report per pack; vision fallback only if evals justify it                               |
+| Model or provider behavior changes                   | Silent regressions                   | Pinned model versions; eval gate; recalibrate on change                                 |
+| Running cost                                         | Budget overrun                       | Spend caps, caching, cheap models for high-volume checks, scale-to-zero infrastructure  |
+| Scope creep                                          | Unfinished project                   | Milestone order; the second pack is optional                                            |
 
 ## 18. Open questions
 
-1. **API hosting:** Lambda with the Lambda Web Adapter and response streaming, or a single Fargate task. Decide in M6 on cost and streaming support.
-2. **Company universe:** Which companies and years to ingest, chosen to cover the FinanceBench questions plus the golden set.
-3. **Embedding model:** Choose after a small retrieval eval in M3.
+1. **Free-tier limits:** Confirm current storage limits of the chosen Postgres host and trace limits of LangSmith's free tier, and size the company universe to fit.
+2. **Company universe:** Which companies and years to ingest, chosen to cover the FinanceBench questions plus the golden set within free-tier storage.
+3. **Embedding model:** Which open model; choose after a small retrieval eval in M3.
 4. **Second pack:** Clinical trials or government budgets; decide at M8.
 5. **User group:** Who the first users are, and how to recruit them.

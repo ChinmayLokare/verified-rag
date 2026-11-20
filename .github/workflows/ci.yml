@@ -1,0 +1,46 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:0.8.0-pg17
+        env:
+          POSTGRES_USER: vrag
+          POSTGRES_PASSWORD: vrag
+          POSTGRES_DB: vrag
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U vrag -d vrag"
+          --health-interval 2s
+          --health-timeout 5s
+          --health-retries 30
+    env:
+      DATABASE_URL: postgresql://vrag:vrag@localhost:5432/vrag
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - name: Install
+        run: uv sync --locked
+      - name: Lint
+        run: uv run ruff check .
+      - name: Format
+        run: uv run ruff format --check .
+      - name: Types
+        run: uv run pyright
+      - name: Migrations
+        run: uv run vrag migrate
+      - name: Tests
+        run: uv run pytest
