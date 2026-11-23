@@ -49,4 +49,8 @@ def load_pack(pack_id: str, packs_dir: Path) -> Pack:
     factory = getattr(module, "create_connector", None)
     if not callable(factory):
         raise PackError(f"{module_path} must define create_connector(ctx)")
-    return Pack(spec=spec, root=root, create_connector=cast(ConnectorFactory, factory))
+    prompt_path = root / "prompt.md"
+    prompt = prompt_path.read_text(encoding="utf-8") if prompt_path.is_file() else ""
+    return Pack(
+        spec=spec, root=root, create_connector=cast(ConnectorFactory, factory), prompt=prompt
+    )

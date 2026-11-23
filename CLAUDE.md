@@ -31,7 +31,7 @@ Agentic RAG over documents that mix prose and structured data. Every number and 
 
 ## Current status
 
-M0 (skeleton) and M1 (facts path) are done. M1 is validated on real EDGAR data for the 10 pack companies (ADR-9 has the cross-check results). Next is M2 (agent and verifier).
+M0 (skeleton), M1 (facts path), and M2 (agent and verifier) are done. M2 runs on a free local model (Ollama `qwen2.5:3b`, ADR-10); LangSmith tracing is not wired yet (needs a free key). Next is M3 (text path).
 
 ```sh
 docker compose up -d          # Postgres 17 + pgvector on localhost:5433 (5432 is often taken by a native install)
@@ -47,9 +47,13 @@ uv run vrag compare "operating income" --entities AAPL MSFT --from 2022 --to 202
 uv run vrag calc "(a - b) / b * 100" a=f_12 b=f_9
 uv run vrag source f_12
 uv run vrag resolve-entity "apple" ; uv run vrag resolve-concept "sales"
+uv run vrag ask "What was Apple's revenue in fiscal 2024?"   # agent + verifier; needs Ollama
+uv run python -m evals.harness.run                  # M2 smoke eval; --paid for paid providers
 ```
 
 - On this Windows machine `uv` may not be on PATH; use `python -m uv ...` with no venv active.
+- `vrag ask` needs the Ollama server (`ollama serve`, or the Ollama app) and the model pulled: `ollama pull qwen2.5:3b`. Ollama answers on 127.0.0.1, not `localhost`.
+- Agent code (`agent/`) wraps LangGraph; `verify/`, `tools/`, and `store/` must stay free of LangChain/LangGraph imports. Tests use a scripted fake model (`tests/test_agent_graph.py`), never a real one.
 - If a command can't reach the database, Docker Desktop is probably not running (common after a reboot): start it, then `docker compose up -d`. Connections time out after 5 s.
 - Bump `NORMALIZER_VERSION` (core) or the pack's `parser_version` when normalization output changes, so `vrag ingest --offline` rewrites every document.
 - The user has ADHD: explain and report in small, goal-first chunks with a runnable check after each.

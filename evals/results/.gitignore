@@ -1,0 +1,2 @@
+# Eval run outputs (per-question JSONL and a summary). Summaries may be committed.
+*.jsonl

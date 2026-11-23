@@ -1,0 +1,16 @@
+{
+  "model": "qwen2.5:3b",
+  "provider": "ollama",
+  "reasoning": false,
+  "seed": 7,
+  "questions": 20,
+  "answerable": 16,
+  "answered": 3,
+  "correct": 3,
+  "wrong": 0,
+  "coverage": 0.1875,
+  "wrong_answer_rate": 0.0,
+  "accuracy_on_all_answerable": 0.1875,
+  "correct_refusals": "4/4",
+  "minutes": 9.6
+}

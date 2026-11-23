@@ -130,3 +130,4 @@ class Pack:
     spec: PackSpec
     root: Path
     create_connector: ConnectorFactory
+    prompt: str = ""  # domain notes for the agent, from prompt.md

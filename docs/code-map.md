@@ -2,7 +2,7 @@
 
 How the code fits together: packages, classes, functions, and the calls between them. This file is updated in the same change as the code it describes (rule in [CLAUDE.md](../CLAUDE.md)). For *why* things are designed this way, see [design.md](design.md).
 
-**Last updated:** M1 (facts path).
+**Last updated:** M2 (agent and verifier).
 
 ## Legend
 
@@ -41,9 +41,11 @@ flowchart TD
     tools["tools<br/>resolve, calculator, calculate"]:::built
     finance["packs/finance<br/>EDGAR connector, concepts"]:::built
 
-    agent["agent<br/>LangGraph graph (M2)"]:::planned
-    verify["verify<br/>verifier, confidence (M2)"]:::planned
-    obs["observability (M2)"]:::planned
+    agent["agent<br/>graph, tools, guard, ask"]:::built
+    verify["verify<br/>numbers, verifier, evidence"]:::built
+    evals["evals/harness<br/>smoke eval"]:::built
+    ollama[("Ollama (local model)")]:::ext
+    obs["observability<br/>LangSmith tracing (M2, pending key)"]:::planned
     api["api<br/>FastAPI (M6)"]:::planned
     mcp["mcp<br/>MCP server (M6)"]:::planned
 
@@ -64,10 +66,15 @@ flowchart TD
     tools --> refs
     store --> refs
 
-    agent -.-> tools
-    agent -.-> store
-    agent -.-> verify
-    verify -.-> store
+    cli --> agent
+    agent --> tools
+    agent --> store
+    agent --> verify
+    agent --> ollama
+    verify --> store
+    verify --> tools
+    evals --> agent
+    evals --> verify
     agent -.-> obs
     api -.-> agent
     mcp -.-> api
@@ -345,7 +352,124 @@ classDiagram
     calculator ..> CalculationError : raises
 ```
 
-### 2c. Entry points and configuration
+### 2c. Agent and verifier (M2)
+
+Nodes in `graph.py` are thin; the guard, tools, verifier and evidence loader are plain modules. `verify/` has no LangChain or LangGraph imports.
+
+```mermaid
+classDiagram
+    direction LR
+
+    class ask {
+        <<module>>
+        +ask(question, settings, pack_id, model, conn, progress) Outcome
+    }
+    class graph {
+        <<module>>
+        +build_graph(deps) CompiledStateGraph
+        node guard
+        node agent  model call
+        node tools  run tool calls, record refs
+        node verify
+        node refuse
+    }
+    class AgentDeps {
+        <<dataclass>>
+        +model: BaseChatModel
+        +tools: AgentTools
+        +system_prompt: str
+        +load_evidence: callable
+        +max_model_calls, timeout_s, max_cost_usd, max_retries
+        +progress: callable
+    }
+    class AgentState {
+        <<TypedDict>>
+        +messages
+        +seen_refs: list
+        +model_calls, retries, cost_usd
+        +outcome: Outcome
+    }
+    class Outcome {
+        <<pydantic>>
+        +status: answered or refused
+        +answer_text: str
+        +claims: list~CitedClaim~
+        +refusal_reason: str
+        +evidence_found: list
+        +verification_problems: list
+    }
+    class guard {
+        <<module>>
+        +check_question(question) reason or None
+    }
+    class prompts {
+        <<module>>
+        +system_prompt(display_name, pack_prompt) str
+    }
+    class models {
+        <<module>>
+        +build_chat_model(settings) BaseChatModel
+    }
+    class AgentTools {
+        +run(name, args) ToolOutcome
+        -_entity(name) entity_id  via resolve_entity + unambiguous
+        -_concept(phrase) concept_id  via resolve_concept + unambiguous
+    }
+    class TOOL_SCHEMAS {
+        <<pydantic>>
+        lookup_fact  company, concept by name
+        fact_time_series
+        compare_entities
+        calculate
+        submit_answer
+    }
+    class verifier {
+        <<module>>
+        +verify(draft, evidence, seen_refs) VerificationResult
+    }
+    class DraftAnswer {
+        <<pydantic>>
+        +answer_text: str
+        +claims: list~Claim~
+    }
+    class numbers {
+        <<module>>
+        +find_numbers(text) list~WrittenNumber~
+        +matches(written, value, unit) bool
+    }
+    class evidence {
+        <<module>>
+        +load_evidence(conn, refs, limits) dict~Evidence~
+        recomputes calculations
+    }
+    class ChatOllama {
+        <<external>>
+        langchain_ollama
+    }
+
+    ask --> graph : build_graph()
+    ask --> models
+    ask --> prompts
+    ask --> evidence
+    graph --> AgentDeps
+    graph --> AgentState
+    graph ..> Outcome : returns
+    graph --> guard
+    graph --> AgentTools : tools node
+    graph --> verifier : verify node
+    AgentTools --> TOOL_SCHEMAS
+    AgentTools --> resolve_calculate_templates : see 2b
+    verifier --> numbers
+    verifier --> DraftAnswer
+    models ..> ChatOllama : builds
+
+    class resolve_calculate_templates {
+        <<module>>
+        tools.resolve, tools.calculate, store.templates
+    }
+```
+
+### 2d. Entry points and configuration
 
 ```mermaid
 classDiagram
@@ -357,6 +481,7 @@ classDiagram
         -_migrate(settings, status)
         -_ingest(settings, args)
         -_query(conn, settings, args)
+        -_ask(settings, question, pack)  live progress
         -_pick_entity(...) EntityCandidate
         -_pick_concept(...) ConceptCandidate
     }
@@ -375,6 +500,8 @@ classDiagram
         +raw_dir: Path
         +query_timeout_ms: int
         +query_max_rows: int
+        +llm_provider, llm_model, llm_num_ctx
+        +agent_max_model_calls, agent_timeout_s
     }
     class migrate {
         <<module>>
@@ -401,6 +528,12 @@ classDiagram
     cli --> templates : lookup, series, compare, source
     cli --> resolve : resolve-entity, resolve-concept
     cli --> calculate : calc command
+    cli --> ask_module : ask command
+
+    class ask_module {
+        <<module>>
+        agent.ask, see 2c
+    }
     cli ..> Refusal : raises when ambiguous
     config ..> Settings : returns (cached)
     BaseSettings <|-- Settings
@@ -496,6 +629,40 @@ sequenceDiagram
     K->>DB: INSERT calculations (expression, input refs, result)
     K-->>CLI: CalcResult calc_N
     CLI-->>Dev: calc_N = value unit
+```
+
+### `vrag ask`
+
+```mermaid
+sequenceDiagram
+    actor Dev
+    participant CLI as cli._ask
+    participant G as agent.graph
+    participant M as Ollama model
+    participant T as AgentTools
+    participant V as verify.verifier
+    participant DB as Postgres (read-only)
+
+    Dev->>CLI: vrag ask "What was Apple's revenue in fiscal 2024?"
+    CLI->>G: ask(question, progress=print)
+    G->>G: guard: advice, forecast, price questions refused here
+    loop until submit_answer, refusal, or budget
+        G->>M: messages + tool schemas
+        M-->>G: tool calls
+        G->>T: run each tool
+        T->>DB: resolve names, run template, or calculate
+        T-->>G: JSON data, refs recorded in seen_refs
+    end
+    M-->>G: submit_answer(answer_text, claims with refs)
+    G->>DB: load_evidence(refs), recompute calcs
+    G->>V: verify(draft, evidence, seen_refs)
+    alt passes
+        G-->>CLI: Outcome answered, claims with sources
+    else fails, retry left
+        G->>M: problems listed, try again
+    else fails
+        G-->>CLI: Outcome refused, evidence found
+    end
 ```
 
 ### `vrag migrate`

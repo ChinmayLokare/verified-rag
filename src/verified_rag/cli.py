@@ -9,6 +9,7 @@ Exit codes: 0 ok, 1 error, 2 ambiguous or not found (the CLI refuses rather than
 
 import argparse
 import sys
+import time
 from collections.abc import Sequence
 from decimal import Decimal
 
@@ -94,6 +95,9 @@ def _parser() -> argparse.ArgumentParser:
 
     src = commands.add_parser("source", help="where a fact came from, e.g. source f_12")
     src.add_argument("ref")
+
+    ask = commands.add_parser("ask", help='a question in plain English, e.g. ask "..."')
+    ask.add_argument("question")
     return parser
 
 
@@ -105,6 +109,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return _migrate(settings, status=args.status)
         if args.command == "ingest":
             return _ingest(settings, args)
+        if args.command == "ask":
+            return _ask(settings, args.question, args.pack)
         with connect(settings.database_url) as conn:
             return _query(conn, settings, args)
     except Refusal as exc:
@@ -152,6 +158,39 @@ def _ingest(settings: Settings, args: argparse.Namespace) -> int:
         report = ingest(conn, pack, ctx, entities)
     _print_ingest(report, verbose=args.verbose)
     return 0 if report.ok else 1
+
+
+def _ask(settings: Settings, question: str, pack: str) -> int:
+    from verified_rag.agent.ask import ask  # imports the model stack only when needed
+
+    started = time.monotonic()
+
+    def progress(message: str) -> None:
+        print(f"[{time.monotonic() - started:5.1f}s] {message}", file=sys.stderr, flush=True)
+
+    print(f"Asking {settings.llm_model} (local models can take a few minutes)...", file=sys.stderr)
+    outcome = ask(question, settings, pack, progress=progress)
+    print(file=sys.stderr)
+    stats = f"({outcome.model_calls} model calls, {outcome.elapsed_s:.1f}s)"
+    if outcome.status == "answered":
+        print(outcome.answer_text)
+        print()
+        for claim in outcome.claims:
+            print(f"  - {claim.text}")
+            for ref, source in zip(claim.evidence, claim.sources, strict=False):
+                print(f"      {ref}: {source}")
+        print()
+        print(f"verified {stats}")
+        return 0
+    print(f"Can't answer: {outcome.refusal_reason}")
+    for problem in outcome.verification_problems[:5]:
+        print(f"  - {problem}")
+    if outcome.evidence_found:
+        print("Evidence found:")
+        for line in outcome.evidence_found[:10]:
+            print(f"  {line}")
+    print(f"refused {stats}")
+    return 2
 
 
 def _print_ingest(report: IngestReport, *, verbose: bool) -> None:

@@ -10,10 +10,10 @@ from verified_rag.tools.calculator import (
     parse_unit,
 )
 
-REV_23 = Operand("f_1", Decimal("383285000000"), "USD", "duration")
-REV_24 = Operand("f_2", Decimal("391035000000"), "USD", "duration")
-OPINC_24 = Operand("f_3", Decimal("123216000000"), "USD", "duration")
-ASSETS = Operand("f_4", Decimal("364980000000"), "USD", "instant")
+REV_23 = Operand("f_1", Decimal("500000000000"), "USD", "duration")
+REV_24 = Operand("f_2", Decimal("510110000000"), "USD", "duration")
+OPINC_24 = Operand("f_3", Decimal("160735000000"), "USD", "duration")
+ASSETS = Operand("f_4", Decimal("600000000000"), "USD", "instant")
 SHARES = Operand("f_5", Decimal("15000000000"), "shares", "duration")
 EUR = Operand("f_6", Decimal("10"), "EUR", "duration")
 

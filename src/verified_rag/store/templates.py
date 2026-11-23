@@ -236,6 +236,11 @@ _ENTITIES: LiteralString = (
     " WHERE pack_id = %(pack_id)s ORDER BY entity_id LIMIT %(limit)s"
 )
 
+_ENTITIES_BY_ID: LiteralString = (
+    "SELECT entity_id, external_id, name, aliases, attributes FROM v_entities"
+    " WHERE entity_id = ANY(%(ids)s) ORDER BY entity_id LIMIT %(limit)s"
+)
+
 _CONCEPT_ALIASES: LiteralString = (
     "SELECT a.concept_id, a.concept_name, c.description, c.unit_kind, a.alias, a.source"
     " FROM v_concept_aliases a JOIN v_concepts c ON c.concept_id = a.concept_id"
@@ -291,6 +296,16 @@ def calculations_by_id(
 def list_entities(conn: psycopg.Connection, pack_id: str, limits: QueryLimits) -> list[EntityRow]:
     with read_only(conn, limits), conn.cursor(row_factory=class_row(EntityRow)) as cur:
         return cur.execute(_ENTITIES, {"pack_id": pack_id, "limit": limits.max_rows}).fetchall()
+
+
+def entities_by_id(
+    conn: psycopg.Connection, entity_ids: list[int], limits: QueryLimits
+) -> dict[int, EntityRow]:
+    with read_only(conn, limits), conn.cursor(row_factory=class_row(EntityRow)) as cur:
+        rows = cur.execute(
+            _ENTITIES_BY_ID, {"ids": entity_ids, "limit": limits.max_rows}
+        ).fetchall()
+    return {r.entity_id: r for r in rows}
 
 
 def list_concept_aliases(
