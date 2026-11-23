@@ -31,7 +31,7 @@ Agentic RAG over documents that mix prose and structured data. Every number and 
 
 ## Current status
 
-M0 (skeleton) is done. Next is M1 (facts path).
+M0 (skeleton) and M1 (facts path) are done. M1 is validated on real EDGAR data for the 10 pack companies (ADR-9 has the cross-check results). Next is M2 (agent and verifier).
 
 ```sh
 docker compose up -d          # Postgres 17 + pgvector on localhost:5433 (5432 is often taken by a native install)
@@ -39,8 +39,23 @@ uv sync                       # install dependencies (uv.lock is committed; CI u
 uv run vrag migrate           # apply migrations; `--status` to list them
 uv run ruff check . && uv run ruff format --check . && uv run pyright
 uv run pytest                 # integration tests skip if Postgres is unreachable
+
+uv run vrag ingest [AAPL ...] [-v] [--offline]   # EDGAR -> facts; needs VRAG_FINANCE_SEC_USER_AGENT
+uv run vrag lookup AAPL revenue --year 2024 [--period Q1]
+uv run vrag series AAPL "net income" --from 2020 --to 2024
+uv run vrag compare "operating income" --entities AAPL MSFT --from 2022 --to 2024
+uv run vrag calc "(a - b) / b * 100" a=f_12 b=f_9
+uv run vrag source f_12
+uv run vrag resolve-entity "apple" ; uv run vrag resolve-concept "sales"
 ```
 
-- Config comes from the environment or `.env` (copy `.env.example`). `DATABASE_URL` is the only setting so far.
+- On this Windows machine `uv` may not be on PATH; use `python -m uv ...` with no venv active.
+- If a command can't reach the database, Docker Desktop is probably not running (common after a reboot): start it, then `docker compose up -d`. Connections time out after 5 s.
+- Bump `NORMALIZER_VERSION` (core) or the pack's `parser_version` when normalization output changes, so `vrag ingest --offline` rewrites every document.
+- The user has ADHD: explain and report in small, goal-first chunks with a runnable check after each.
+- Config comes from the environment or `.env` (copy `.env.example`): `DATABASE_URL`, `PACKS_DIR`, `RAW_DIR`, `QUERY_TIMEOUT_MS`, `QUERY_MAX_ROWS`. Packs read their own settings (finance: `VRAG_FINANCE_*`).
+- Raw downloads are cached in `data/raw/<pack>/` (gitignored). `--offline` re-runs from the cache.
+- CLI exit codes: 0 ok, 1 error, 2 refused (ambiguous entity/concept or no clean value).
+- Tests use a synthetic company in `tests/fixtures/edgar/` (made-up numbers). Never put real figures from memory in fixtures or docs.
 - Migrations are forward-only numbered SQL files in `src/verified_rag/store/migrations/`. Never edit an applied one; add a new file (ADR-8, `docs/adr/0008-plain-sql-migrations.md`).
 - New ADRs go in `docs/adr/`, continuing from ADR-7 in the design doc.

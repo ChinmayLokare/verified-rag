@@ -1,0 +1,221 @@
+# Canonical concepts for the finance pack.
+#
+# tags: XBRL tags in priority order. When a filing reports several tags for the same concept
+#       and period, the first one listed wins. Only list tags that mean the same thing:
+#       a near-synonym that differs in scope (for example LongTermDebt, which includes the
+#       current portion, vs LongTermDebtNoncurrent) belongs in its own concept.
+# aliases: words people use in questions, for resolve_concept.
+
+concepts:
+  # --- income statement -----------------------------------------------------------------
+  - name: revenue
+    description: Total revenue (net sales) for the period
+    unit_kind: monetary
+    tags:
+      - us-gaap:Revenues
+      - us-gaap:RevenueFromContractWithCustomerExcludingAssessedTax
+      - us-gaap:SalesRevenueNet
+      - us-gaap:RevenueFromContractWithCustomerIncludingAssessedTax
+    aliases: [revenue, revenues, net revenue, net revenues, total revenue, total revenues,
+              net sales, total net sales, sales, top line, turnover]
+
+  - name: cost_of_revenue
+    description: Cost of revenue (cost of sales, cost of goods sold)
+    unit_kind: monetary
+    tags:
+      - us-gaap:CostOfRevenue
+      - us-gaap:CostOfGoodsAndServicesSold
+      - us-gaap:CostOfGoodsSold
+    aliases: [cost of revenue, cost of revenues, cost of sales, cost of goods sold, cogs,
+              total cost of sales]
+
+  - name: gross_profit
+    description: Revenue minus cost of revenue, as reported
+    unit_kind: monetary
+    tags: [us-gaap:GrossProfit]
+    aliases: [gross profit, gross margin dollars, gross income]
+
+  - name: research_and_development
+    description: Research and development expense
+    unit_kind: monetary
+    tags:
+      - us-gaap:ResearchAndDevelopmentExpense
+      - us-gaap:ResearchAndDevelopmentExpenseExcludingAcquiredInProcessCost
+    aliases: [research and development, r&d, r and d, research and development expense]
+
+  - name: selling_general_administrative
+    description: Selling, general and administrative expense
+    unit_kind: monetary
+    tags: [us-gaap:SellingGeneralAndAdministrativeExpense]
+    aliases: [selling general and administrative, sg&a, sga, selling general administrative,
+              selling general and administrative expense]
+
+  - name: operating_expenses
+    description: Total operating expenses, as reported
+    unit_kind: monetary
+    tags: [us-gaap:OperatingExpenses]
+    aliases: [operating expenses, total operating expenses, opex]
+
+  - name: operating_income
+    description: Operating income (loss)
+    unit_kind: monetary
+    tags: [us-gaap:OperatingIncomeLoss]
+    # Not "EBIT": it is often defined differently from reported operating income.
+    aliases: [operating income, operating profit, income from operations, operating loss]
+
+  - name: interest_expense
+    description: Interest expense
+    unit_kind: monetary
+    tags: [us-gaap:InterestExpense, us-gaap:InterestExpenseNonoperating]
+    aliases: [interest expense]
+
+  - name: income_before_tax
+    description: Income from continuing operations before income taxes
+    unit_kind: monetary
+    tags:
+      - us-gaap:IncomeLossFromContinuingOperationsBeforeIncomeTaxesExtraordinaryItemsNoncontrollingInterest
+      - us-gaap:IncomeLossFromContinuingOperationsBeforeIncomeTaxesMinorityInterestAndIncomeLossFromEquityMethodInvestments
+    aliases: [income before tax, income before taxes, pretax income, pre-tax income,
+              earnings before taxes, income before income taxes]
+
+  - name: income_tax_expense
+    description: Income tax expense (benefit)
+    unit_kind: monetary
+    tags: [us-gaap:IncomeTaxExpenseBenefit]
+    aliases: [income tax, income taxes, income tax expense, provision for income taxes,
+              tax expense]
+
+  - name: net_income
+    description: Net income (loss) attributable to the parent company
+    unit_kind: monetary
+    tags: [us-gaap:NetIncomeLoss]
+    aliases: [net income, net earnings, net profit, profit, bottom line, net loss, earnings]
+
+  - name: eps_basic
+    description: Basic earnings per share
+    unit_kind: per_share
+    tags: [us-gaap:EarningsPerShareBasic]
+    aliases: [basic eps, basic earnings per share, eps basic]
+
+  - name: eps_diluted
+    description: Diluted earnings per share
+    unit_kind: per_share
+    tags: [us-gaap:EarningsPerShareDiluted]
+    aliases: [diluted eps, diluted earnings per share, eps, earnings per share]
+
+  - name: weighted_average_diluted_shares
+    description: Weighted-average diluted shares outstanding for the period
+    unit_kind: shares
+    tags: [us-gaap:WeightedAverageNumberOfDilutedSharesOutstanding]
+    aliases: [diluted shares, weighted average diluted shares, diluted share count]
+
+  - name: depreciation_and_amortization
+    description: Depreciation, depletion and amortization
+    unit_kind: monetary
+    tags:
+      - us-gaap:DepreciationDepletionAndAmortization
+      - us-gaap:DepreciationAmortizationAndAccretionNet
+      - us-gaap:DepreciationAndAmortization
+    aliases: [depreciation and amortization, d&a, depreciation]
+
+  # --- balance sheet --------------------------------------------------------------------
+  - name: cash_and_equivalents
+    description: Cash and cash equivalents at carrying value
+    unit_kind: monetary
+    tags: [us-gaap:CashAndCashEquivalentsAtCarryingValue]
+    aliases: [cash, cash and cash equivalents, cash and equivalents]
+
+  - name: accounts_receivable
+    description: Accounts receivable, net, current
+    unit_kind: monetary
+    tags: [us-gaap:AccountsReceivableNetCurrent]
+    aliases: [accounts receivable, receivables, trade receivables]
+
+  - name: inventory
+    description: Inventory, net
+    unit_kind: monetary
+    tags: [us-gaap:InventoryNet]
+    aliases: [inventory, inventories]
+
+  - name: current_assets
+    description: Total current assets
+    unit_kind: monetary
+    tags: [us-gaap:AssetsCurrent]
+    aliases: [current assets, total current assets]
+
+  - name: property_plant_equipment_net
+    description: Property, plant and equipment, net
+    unit_kind: monetary
+    tags: [us-gaap:PropertyPlantAndEquipmentNet]
+    aliases: [property plant and equipment, pp&e, ppe, net ppe, fixed assets]
+
+  - name: total_assets
+    description: Total assets
+    unit_kind: monetary
+    tags: [us-gaap:Assets]
+    aliases: [total assets, assets]
+
+  - name: current_liabilities
+    description: Total current liabilities
+    unit_kind: monetary
+    tags: [us-gaap:LiabilitiesCurrent]
+    aliases: [current liabilities, total current liabilities]
+
+  - name: long_term_debt_noncurrent
+    description: Long-term debt excluding the current portion
+    unit_kind: monetary
+    tags: [us-gaap:LongTermDebtNoncurrent]
+    aliases: [long-term debt, long term debt, non-current debt, noncurrent debt]
+
+  - name: total_liabilities
+    description: Total liabilities
+    unit_kind: monetary
+    tags: [us-gaap:Liabilities]
+    aliases: [total liabilities, liabilities]
+
+  - name: stockholders_equity
+    description: Total stockholders' equity attributable to the parent
+    unit_kind: monetary
+    tags: [us-gaap:StockholdersEquity]
+    aliases: [stockholders equity, shareholders equity, total equity, equity, book value,
+              total shareholders equity]
+
+  # --- cash flow statement --------------------------------------------------------------
+  - name: operating_cash_flow
+    description: Net cash provided by (used in) operating activities
+    unit_kind: monetary
+    tags: [us-gaap:NetCashProvidedByUsedInOperatingActivities]
+    aliases: [operating cash flow, cash from operations, cash flow from operations,
+              cash generated by operating activities, net cash from operating activities]
+
+  - name: capital_expenditure
+    description: Payments to acquire property, plant and equipment
+    unit_kind: monetary
+    tags: [us-gaap:PaymentsToAcquirePropertyPlantAndEquipment]
+    aliases: [capital expenditure, capital expenditures, capex,
+              purchases of property plant and equipment]
+
+  - name: investing_cash_flow
+    description: Net cash provided by (used in) investing activities
+    unit_kind: monetary
+    tags: [us-gaap:NetCashProvidedByUsedInInvestingActivities]
+    aliases: [investing cash flow, cash from investing, net cash from investing activities]
+
+  - name: financing_cash_flow
+    description: Net cash provided by (used in) financing activities
+    unit_kind: monetary
+    tags: [us-gaap:NetCashProvidedByUsedInFinancingActivities]
+    aliases: [financing cash flow, cash from financing, net cash from financing activities]
+
+  - name: dividends_paid
+    description: Cash dividends paid
+    unit_kind: monetary
+    tags: [us-gaap:PaymentsOfDividends, us-gaap:PaymentsOfDividendsCommonStock]
+    aliases: [dividends paid, dividends, cash dividends, payments of dividends]
+
+  - name: share_repurchases
+    description: Payments for repurchase of common stock
+    unit_kind: monetary
+    tags: [us-gaap:PaymentsForRepurchaseOfCommonStock]
+    aliases: [share repurchases, buybacks, stock buybacks, share buybacks,
+              repurchases of common stock]

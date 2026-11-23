@@ -1,0 +1,7 @@
+# Units accepted from XBRL facts, with the kind each one measures. Facts in any other unit
+# (for example a foreign currency) are skipped at ingestion and counted in the report.
+units:
+  USD: {kind: monetary}
+  USD/shares: {kind: per_share}
+  shares: {kind: shares}
+  pure: {kind: ratio}

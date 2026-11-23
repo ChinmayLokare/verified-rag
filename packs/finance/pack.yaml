@@ -1,0 +1,30 @@
+id: finance
+display_name: SEC filings (10-K, 10-Q)
+# Bump when normalization output for this pack changes, so documents are re-ingested.
+parser_version: finance-companyfacts-1
+document_types: [10-K, 10-K/A, 10-Q, 10-Q/A]
+
+# Initial universe: ten companies with a spread of fiscal year ends
+# (September, June, May, January, late November, December 52/53-week).
+# Revisit against FinanceBench coverage (design.md open question 2).
+entities:
+  - ref: AAPL
+    aliases: [Apple]
+  - ref: MSFT
+    aliases: [Microsoft]
+  - ref: NKE
+    aliases: [Nike]
+  - ref: WMT
+    aliases: [Walmart]
+  - ref: ADBE
+    aliases: [Adobe]
+  - ref: AMD
+    aliases: [Advanced Micro Devices]
+  - ref: MMM
+    aliases: [3M]
+  - ref: KO
+    aliases: [Coca-Cola, Coke]
+  - ref: PEP
+    aliases: [PepsiCo, Pepsi]
+  - ref: JNJ
+    aliases: [Johnson & Johnson, J&J]

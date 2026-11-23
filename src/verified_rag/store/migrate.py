@@ -13,6 +13,8 @@ from typing import LiteralString, cast
 
 import psycopg
 
+from verified_rag.store.db import connect
+
 _FILENAME = re.compile(r"^(?P<version>\d{4})_(?P<name>[a-z0-9_]+)\.sql$")
 
 # Arbitrary constant key so concurrent runners serialize instead of racing.
@@ -87,7 +89,7 @@ def apply_pending(database_url: str, migrations: list[Migration] | None = None) 
     """Apply every migration not yet recorded. Returns the ones applied by this call."""
     migrations = discover() if migrations is None else migrations
     done: list[Migration] = []
-    with psycopg.connect(database_url, autocommit=True) as conn:
+    with connect(database_url) as conn:
         conn.execute("SELECT pg_advisory_lock(%s)", (_LOCK_KEY,))
         try:
             conn.execute(_BOOKKEEPING)
@@ -112,7 +114,7 @@ def apply_pending(database_url: str, migrations: list[Migration] | None = None) 
 
 def status(database_url: str) -> list[str]:
     migrations = discover()
-    with psycopg.connect(database_url, autocommit=True) as conn:
+    with connect(database_url) as conn:
         conn.execute(_BOOKKEEPING)
         applied = _applied(conn)
     _check_applied(migrations, applied)
