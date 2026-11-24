@@ -29,6 +29,8 @@ Agentic RAG over documents that mix prose and structured data. Every number and 
 - Record significant decisions as a short ADR in `docs/adr/`.
 - **Keep [docs/code-map.md](docs/code-map.md) current. This is mandatory.** Any change that adds, renames, or removes a module, public function, class, or Protocol, changes dependencies between packages, adds a user-facing flow (CLI command, endpoint, graph path, pipeline), or changes the schema must update the matching diagram in the same change. A change is not done until the map matches the code. The checklist is at the bottom of that file.
 
+- **Keep [interview/](interview/) current. This is mandatory.** One plain-language doc per milestone (`interview/M<n>-<name>.md`) for the user's interview prep. When a milestone is done, write its doc before committing; when any later change alters a milestone's behavior, update that doc too. **When the user asks a question about a past milestone, answer it and add the question and answer to that milestone's "Q&A log" section in the same turn.** Each doc follows the flow-friendly format in [interview/README.md](interview/README.md): levels with a goal and a check question, one running example (Nike's FY2024 revenue) with real values from the database (never from memory), a "Problems & fixes" section (symptom → cause → fix → result), interview Q&A, and diagrams where they help.
+
 ## Current status
 
 M0 (skeleton), M1 (facts path), and M2 (agent and verifier) are done. M2 runs on a free local model (Ollama `qwen2.5:3b`, ADR-10); LangSmith tracing is not wired yet (needs a free key). Next is M3 (text path).
